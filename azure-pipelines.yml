@@ -4,77 +4,87 @@ trigger:
       - main
 
 variables:
-  tf_version: '1.6.6'
+  terraformWorkingDirectory: 'infra'  # The folder where your .tf files are located
   environment: 'staging'
-  terraformWorkingDirectory: 'infra'
+  ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)  # Use the pipeline variable for ARM Subscription ID
 
 stages:
-
-### ------------------------------------
-### Stage 1: Terraform Validate & Plan
-### ------------------------------------
 - stage: ValidateAndPlan
-  displayName: Terraform Validate and Plan
+  displayName: Terraform Validate & Plan
   jobs:
     - job: TerraformPlan
-      displayName: Run Terraform Validate and Plan
+      displayName: Validate and Plan Terraform
       pool:
-        vmImage: 'ubuntu-latest'
+        vmImage: ubuntu-latest
       steps:
-        - task: UsePythonVersion@0
-          inputs:
-            versionSpec: '3.x'
-
-        - task: TerraformInstaller@1
-          inputs:
-            terraformVersion: '$(tf_version)'
-
         - checkout: self
 
         - task: AzureCLI@2
-          displayName: Terraform Init and Plan
+          displayName: Install & Run Terraform
           inputs:
             azureSubscription: 'terraform-acr'
             scriptType: bash
             scriptLocation: inlineScript
-            workingDirectory: '$(terraformWorkingDirectory)'
+            workingDirectory: $(Build.SourcesDirectory)/$(terraformWorkingDirectory)
             inlineScript: |
-              terraform init
-              terraform validate
-              terraform plan -out=tfplan -input=false -var="subscription_id=$(ARM_SUBSCRIPTION_ID)"
+              echo "Installing Terraform..."
+              sudo apt-get update -y
+              sudo apt-get install -y gnupg software-properties-common curl unzip
+              curl -fsSL https://apt.releases.hashicorp.com/gpg | gpg --dearmor | sudo tee /usr/share/keyrings/hashicorp-archive-keyring.gpg > /dev/null
+              echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
+              sudo apt-get update && sudo apt-get install terraform -y
+              terraform -version
 
-        - publish: '$(terraformWorkingDirectory)/tfplan'
+              echo "Fetching Subscription ID..."
+              ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+
+              echo "Running Terraform Init..."
+              terraform init
+
+              echo "Validating..."
+              terraform validate
+
+              echo "Planning..."
+              terraform plan -out=tfplan -input=false -var="subscription_id=aeebd5a2-dea5-466f-9315-585bc8acbe94"
+
+        - publish: $(Build.SourcesDirectory)/$(terraformWorkingDirectory)/tfplan
           artifact: tfplan
 
-### ------------------------------------
-### Stage 2: Terraform Apply (Release)
-### ------------------------------------
 - stage: Apply
-  displayName: Terraform Apply
+  displayName: Terraform Apply (Release)
   dependsOn: ValidateAndPlan
   condition: succeeded()
   jobs:
-    - deployment: TerraformApply
-      displayName: Terraform Apply in Azure
-      environment: 'staging' # You can parameterize this later
+    - deployment: ApplyTerraform
+      displayName: Apply Terraform to Azure
+      environment: 'staging'
       strategy:
         runOnce:
           deploy:
             steps:
-              - task: TerraformInstaller@1
-                inputs:
-                  terraformVersion: '$(tf_version)'
+              - checkout: self
 
               - download: current
                 artifact: tfplan
 
               - task: AzureCLI@2
-                displayName: Terraform Apply
+                displayName: Install & Apply Terraform
                 inputs:
                   azureSubscription: 'terraform-acr'
                   scriptType: bash
                   scriptLocation: inlineScript
-                  workingDirectory: '$(terraformWorkingDirectory)'
+                  workingDirectory: $(Build.SourcesDirectory)/$(terraformWorkingDirectory)
                   inlineScript: |
+                    echo "Installing Terraform..."
+                    sudo apt-get update -y
+                    sudo apt-get install -y gnupg software-properties-common curl unzip
+                    curl -fsSL https://apt.releases.hashicorp.com/gpg | gpg --dearmor | sudo tee /usr/share/keyrings/hashicorp-archive-keyring.gpg > /dev/null
+                    echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
+                    sudo apt-get update && sudo apt-get install terraform -y
+                    terraform -version
+
+                    echo "Init..."
                     terraform init
+
+                    echo "Apply..."
                     terraform apply -auto-approve tfplan
